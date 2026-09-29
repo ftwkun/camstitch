@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Пузырь 360</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#050607">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+/* Layout: full-bleed WebGL sphere, HUD top, controls bar bottom, settings drawer above it */
+:root{
+  --bg:#050607; --panel:rgba(14,17,20,.82); --line:rgba(255,255,255,.12);
+  --fg:#e9eef2; --muted:#8a96a0; --accent:#5fd4c4; --warn:#f2b24c; --bad:#f06a5a;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.4 var(--sans);overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
+.hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 10px) 16px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;pointer-events:none}
+.chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:4px 10px;font:12px var(--mono);font-variant-numeric:tabular-nums;backdrop-filter:blur(6px)}
+.chip b{color:var(--accent);font-weight:600}
+.chip.state-paint b{color:var(--accent)} .chip.state-fast b{color:var(--warn)} .chip.state-off b{color:var(--muted)} .chip.state-lost b{color:var(--bad)}
+.seg{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.seg span{width:100%;font-size:13px}
+.seg button{padding:8px 10px;font-size:13px;font-weight:500}
+.bar{position:fixed;left:0;right:0;bottom:0;padding:10px 16px calc(env(safe-area-inset-bottom,0px) + 12px);display:flex;gap:6px;justify-content:center;flex-wrap:wrap}
+button{font:600 14px var(--sans);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 11px;min-width:44px;backdrop-filter:blur(6px)}
+button:active{transform:scale(.97)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);color:#04211d;border-color:transparent}
+button.on{border-color:var(--accent);color:var(--accent)}
+.drawer{position:fixed;left:16px;right:16px;bottom:calc(env(safe-area-inset-bottom,0px) + 76px);max-width:420px;margin:0 auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;display:grid;gap:10px;backdrop-filter:blur(8px)}
+.row{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center}
+.row label{font-size:13px}
+.row output{font:12px var(--mono);color:var(--accent);font-variant-numeric:tabular-nums}
+.row input{grid-column:1/-1;width:100%;accent-color:var(--accent)}
+.hint{font-size:12px;color:var(--muted)}
+.splash{position:fixed;inset:0;display:grid;place-items:center;padding:24px 16px;pointer-events:none}
+.splash div{max-width:340px;text-align:center;display:grid;gap:10px}
+.splash h1{margin:0;font:600 22px var(--sans);letter-spacing:.01em}
+.splash p{margin:0;color:var(--muted)}
+.err{color:var(--bad)}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div class="hud">
+  <span class="chip" id="cov">покрытие <b>0%</b></span>
+  <span class="chip state-off" id="st">кисть <b>—</b></span>
+  <span class="chip" id="spd">ω <b>0</b>°/с</span>
+  <span class="chip" id="src">датчик <b>—</b></span>
+</div>
+
+<div class="splash" id="splash"><div>
+  <h1>Пузырь 360</h1>
+  <p>Нажмите «Старт» и медленно поворачивайтесь с телефоном, стоя на месте. Кадры камеры ложатся на сферу по гироскопу.</p>
+  <p class="err" id="secure" hidden>Нужен HTTPS или localhost, иначе браузер не даст камеру.</p>
+</div></div>
+
+<div class="drawer" id="drawer" hidden>
+  <div class="seg" id="seg"><span>Источник поворота</span>
+    <button data-m="" class="on">авто</button><button data-m="vision">картинка</button><button data-m="gyro">гироскоп</button><button data-m="mouse">мышь</button></div>
+  <div class="row"><label for="fov">Угол камеры по длинной стороне</label><output id="fovO">68°</output>
+    <input id="fov" type="range" min="40" max="110" step="1" value="68"></div>
+  <div class="row"><label for="lag">Задержка видео относительно гироскопа</label><output id="lagO">60 мс</output>
+    <input id="lag" type="range" min="0" max="250" step="5" value="60"></div>
+  <div class="row"><label for="vmax">Порог скорости (выше — не красим)</label><output id="vmaxO">45°/с</output>
+    <input id="vmax" type="range" min="10" max="150" step="5" value="45"></div>
+  <div class="row"><label for="str">Сила кисти</label><output id="strO">0.50</output>
+    <input id="str" type="range" min="0.05" max="1" step="0.05" value="0.5"></div>
+  <div class="row"><label for="vfov">Обзор экрана</label><output id="vfovO">95°</output>
+    <input id="vfov" type="range" min="50" max="130" step="1" value="95"></div>
+  <p class="hint">«Картинка» — поворот считается по сдвигу кадра, гироскоп не нужен. Поворачивайте камеру на месте, без сдвига вбок. Задержка нужна только для гироскопа. Угол камеры подбирайте по совпадению швов.</p>
+</div>
+
+<div class="bar">
+  <button class="primary" id="start">Старт</button>
+  <button id="paint" hidden>Пауза</button>
+  <button id="view" hidden>Осмотр</button>
+  <button id="clear" hidden>Сброс</button>
+  <button id="save" hidden>PNG</button>
+  <button id="set" aria-label="Настройки">⚙</button>
+</div>
+
+<script src="three.min.js"></script>
+<script src="pc.js"></script>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+if (!window.isSecureContext) $('secure').hidden = false;
+
+// ---------- renderer ----------
+const canvas = $('gl');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:false, preserveDrawingBuffer:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.autoClear = false;
+const maxTex = renderer.capabilities.maxTextureSize;
+const PW = maxTex >= 4096 ? 4096 : 2048, PH = PW / 2;
+const pano = new THREE.WebGLRenderTarget(PW, PH, {
+  minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter, format:THREE.RGBAFormat,
+  depthBuffer:false, stencilBuffer:false
+});
+function clearPano(){
+  renderer.setRenderTarget(pano); renderer.setClearColor(0x000000, 0); renderer.clear(true,false,false);
+  renderer.setRenderTarget(null);
+}
+clearPano();
+
+// ---------- camera video ----------
+const video = document.createElement('video');
+video.muted = true; video.playsInline = true; video.setAttribute('playsinline','');
+const vtex = new THREE.VideoTexture(video);
+vtex.minFilter = THREE.LinearFilter; vtex.magFilter = THREE.LinearFilter;
+let videoReady = false, newFrame = true;
+function hookFrames(){
+  if (video.requestVideoFrameCallback){
+    const cb = () => { newFrame = true; video.requestVideoFrameCallback(cb); };
+    video.requestVideoFrameCallback(cb);
+  }
+}
+
+// ---------- shared GLSL ----------
+const PI = '3.14159265358979';
+const projGLSL = `
+uniform mat3 uRot;      // world -> camera
+uniform vec2 uTan;      // tan(half fov) x,y
+vec3 camUV(vec3 d){     // returns (u,v,inFront)
+  vec3 c = uRot * d;
+  if (c.z >= -1e-4) return vec3(-1.0);
+  vec2 p = vec2(c.x, c.y) / (-c.z) / uTan;
+  return vec3(p*0.5+0.5, 1.0);
+}`;
+
+// paint pass: fullscreen quad in equirect space
+const paintMat = new THREE.ShaderMaterial({
+  uniforms:{ uVid:{value:vtex}, uRot:{value:new THREE.Matrix3()}, uTan:{value:new THREE.Vector2(1,1)}, uW:{value:0.5} },
+  vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`,
+  fragmentShader:`precision highp float; varying vec2 vUv; uniform sampler2D uVid; uniform float uW; ${projGLSL}
+  void main(){
+    float lon=(vUv.x-0.5)*2.0*${PI}; float lat=(vUv.y-0.5)*${PI};
+    vec3 d=vec3(cos(lat)*sin(lon), sin(lat), -cos(lat)*cos(lon));
+    vec3 q=camUV(d);
+    if(q.z<0.0 || q.x<0.0||q.x>1.0||q.y<0.0||q.y>1.0) discard;
+    float e=min(min(q.x,1.0-q.x),min(q.y,1.0-q.y));
+    float w=smoothstep(0.0,0.18,e)*uW;          // feather to frame edges
+    if(w<=0.001) discard;
+    gl_FragColor=vec4(texture2D(uVid,q.xy).rgb, w);
+  }`,
+  transparent:true, depthTest:false, depthWrite:false,
+  blending:THREE.CustomBlending,
+  blendEquation:THREE.AddEquation, blendSrc:THREE.SrcAlphaFactor, blendDst:THREE.OneMinusSrcAlphaFactor,
+  blendEquationAlpha:THREE.AddEquation, blendSrcAlpha:THREE.OneFactor, blendDstAlpha:THREE.OneMinusSrcAlphaFactor
+});
+const quadGeo = new THREE.PlaneGeometry(2,2);
+const paintScene = new THREE.Scene(); paintScene.add(new THREE.Mesh(quadGeo, paintMat));
+const orthoCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+// display: inside of a sphere, sampled by direction (same mapping as paint)
+const dispMat = new THREE.ShaderMaterial({
+  uniforms:{ uPano:{value:pano.texture}, uVid:{value:vtex}, uRot:{value:new THREE.Matrix3()}, uTan:{value:new THREE.Vector2(1,1)}, uLive:{value:0} },
+  vertexShader:`varying vec3 vDir; void main(){ vDir=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+  fragmentShader:`precision highp float; varying vec3 vDir; uniform sampler2D uPano; uniform sampler2D uVid; uniform float uLive; ${projGLSL}
+  void main(){
+    vec3 d=normalize(vDir);
+    float lon=atan(d.x,-d.z); float lat=asin(clamp(d.y,-1.,1.));
+    vec2 uv=vec2(lon/(2.0*${PI})+0.5, lat/${PI}+0.5);
+    vec4 p=texture2D(uPano,uv);
+    // faint graticule where nothing is painted yet (every 30 deg)
+    vec2 g=abs(fract(vec2(lon,lat)/(${PI}/6.0)+0.5)-0.5)*(${PI}/6.0);
+    float gl=1.0-smoothstep(0.0,0.004,min(g.x/max(cos(lat),0.05),g.y));
+    vec3 base=vec3(0.02,0.025,0.03)+gl*vec3(0.10,0.14,0.15);
+    vec3 col=mix(base,p.rgb/max(p.a,1e-3),clamp(p.a,0.,1.));
+    if(uLive>0.0){
+      vec3 q=camUV(d);
+      if(q.z>0.0 && q.x>=0.0&&q.x<=1.0&&q.y>=0.0&&q.y<=1.0){
+        col=mix(col,texture2D(uVid,q.xy).rgb,0.85*uLive);
+        float e=min(min(q.x,1.0-q.x),min(q.y,1.0-q.y));
+        col=mix(col,vec3(0.37,0.83,0.77),(1.0-smoothstep(0.0,0.008,e))*uLive);
+      }
+    }
+    gl_FragColor=vec4(col,1.0);
+  }`,
+  side:THREE.BackSide, depthTest:false, depthWrite:false
+});
+const viewScene = new THREE.Scene();
+viewScene.add(new THREE.Mesh(new THREE.SphereGeometry(10, 128, 64), dispMat));
+const viewCam = new THREE.PerspectiveCamera(95, 1, 0.1, 100);
+
+// coverage: downsample alpha into a small target and read back
+const covRT = new THREE.WebGLRenderTarget(256,128,{format:THREE.RGBAFormat,depthBuffer:false});
+const covMat = new THREE.ShaderMaterial({ uniforms:{uPano:{value:pano.texture}},
+  vertexShader:`varying vec2 vUv; void main(){vUv=uv; gl_Position=vec4(position.xy,0.,1.);}`,
+  fragmentShader:`precision highp float; varying vec2 vUv; uniform sampler2D uPano; void main(){ gl_FragColor=texture2D(uPano,vUv); }`,
+  depthTest:false, depthWrite:false });
+const covScene = new THREE.Scene(); covScene.add(new THREE.Mesh(quadGeo, covMat));
+const covBuf = new Uint8Array(256*128*4);
+function coverage(){
+  renderer.setRenderTarget(covRT); renderer.render(covScene, orthoCam);
+  renderer.readRenderTargetPixels(covRT,0,0,256,128,covBuf); renderer.setRenderTarget(null);
+  let s=0, t=0;
+  for(let y=0;y<128;y++){ const w=Math.cos(((y+0.5)/128-0.5)*Math.PI);
+    for(let x=0;x<256;x++){ t+=w; if(covBuf[(y*256+x)*4+3]>100) s+=w; } }
+  return s/t;
+}
+
+// ---------- orientation ----------
+const zee = new THREE.Vector3(0,0,1), euler = new THREE.Euler(), q0 = new THREE.Quaternion();
+const qX = new THREE.Quaternion(-Math.sqrt(0.5),0,0,Math.sqrt(0.5)); // look out of the back of the device
+const deg = Math.PI/180;
+const qLive = new THREE.Quaternion();
+const hist = []; // {t, q}
+let gyro = false, lastOri = 0;
+function screenAngle(){ return (screen.orientation && screen.orientation.angle) || window.orientation || 0; }
+function onOri(e){
+  if (e.alpha == null) return;
+  euler.set(e.beta*deg, e.alpha*deg, -e.gamma*deg, 'YXZ');
+  qLive.setFromEuler(euler).multiply(qX).multiply(q0.setFromAxisAngle(zee, -screenAngle()*deg));
+  const t = performance.now();
+  hist.push({t, q:qLive.clone()}); while (hist.length > 120) hist.shift();
+  gyro = true; lastOri = t;
+}
+function qAt(t, out){
+  if (!hist.length) return out.copy(qLive);
+  if (t <= hist[0].t) return out.copy(hist[0].q);
+  for (let i = hist.length-1; i > 0; i--){
+    const a = hist[i-1], b = hist[i];
+    if (a.t <= t){ const k = b.t>a.t ? Math.min(1,(t-a.t)/(b.t-a.t)) : 1; return out.copy(a.q).slerp(b.q, k); }
+  }
+  return out.copy(hist[hist.length-1].q);
+}
+
+// drag control (desktop fallback & free-look mode)
+let yaw = 0, pitch = 0, dragging = false, px = 0, py = 0;
+const qDrag = new THREE.Quaternion();
+function dragQ(){ euler.set(pitch, yaw, 0, 'YXZ'); return qDrag.setFromEuler(euler); }
+canvas.addEventListener('pointerdown', e => { dragging = true; px = e.clientX; py = e.clientY; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const k = viewCam.fov*deg / canvas.clientHeight;
+  yaw += (e.clientX-px)*k; pitch = Math.max(-1.55, Math.min(1.55, pitch + (e.clientY-py)*k));
+  px = e.clientX; py = e.clientY;
+});
+canvas.addEventListener('pointerup', () => dragging = false);
+canvas.addEventListener('pointercancel', () => dragging = false);
+
+// ---------- visual odometry: rotation from image shift (phase correlation, hhgm idea) ----------
+const VN = 256, pc = makePC(VN);
+const vcv = document.createElement('canvas'); vcv.width = VN; vcv.height = VN;
+const vctx = vcv.getContext('2d', {willReadFrequently:true});
+// halving chain so every step is a true 2x average (plain drawImage to 256 keeps webcam noise)
+const halves = [];
+function downsample(){
+  let src = video, w = video.videoWidth, h = video.videoHeight;
+  let i = 0;
+  while (w/2 >= VN*1.5 || h/2 >= VN*1.5) {
+    w = Math.round(w/2); h = Math.round(h/2);
+    if (!halves[i]) { const c = document.createElement('canvas'); halves[i] = { c, x: c.getContext('2d') }; }
+    const H = halves[i];
+    if (H.c.width !== w || H.c.height !== h) { H.c.width = w; H.c.height = h; H.x.imageSmoothingQuality = 'high'; }
+    H.x.drawImage(src, 0, 0, w, h); src = H.c; i++;
+  }
+  vctx.imageSmoothingQuality = 'high';
+  vctx.drawImage(src, 0, 0, VN, VN);
+}
+const gray = new Float32Array(VN*VN);
+let keyR = new Float32Array(VN*VN), keyI = new Float32Array(VN*VN), curR = new Float32Array(VN*VN), curI = new Float32Array(VN*VN);
+const qVis = new THREE.Quaternion(), qKey = new THREE.Quaternion(), qStep = new THREE.Quaternion();
+let hasKey = false, voLost = false, voPsr = 0, lostCount = 0, voFlat = false;
+const PSR_OK = 12, REKEY_AFTER = 10;   // confidence threshold; frames of loss before re-keying at held pose
+window.__bubble = { qVis, stat: () => ({ psr: voPsr, lost: voLost, flat: voFlat }) };
+function swapKey(){ let t = keyR; keyR = curR; curR = t; t = keyI; keyI = curI; curI = t; qKey.copy(qVis); hasKey = true; lostCount = 0; }
+function voStep(){
+  downsample();
+  const d = vctx.getImageData(0, 0, VN, VN).data;
+  let s1 = 0, s2 = 0;
+  for (let i = 0, j = 0; i < VN*VN; i++, j += 4) { const g = d[j]*0.299 + d[j+1]*0.587 + d[j+2]*0.114; gray[i] = g; s1 += g; s2 += g*g; }
+  const sd = Math.sqrt(Math.max(0, s2/(VN*VN) - (s1/(VN*VN))**2));
+  voFlat = sd < 4;                                   // black / blank frame: nothing to track
+  if (voFlat) { voLost = true; voPsr = 0; return; }
+  pc.spectrum(gray, curR, curI);
+  if (!hasKey) { swapKey(); voLost = false; return; }
+  const r = pc.correlate(keyR, keyI, curR, curI);   // content shift key -> current, px (+x right, +y down)
+  voPsr = r.psr;
+  if (r.psr < PSR_OK) {                              // no reliable match: hold pose
+    voLost = true;
+    if (++lostCount >= REKEY_AFTER) swapKey();       // scene moved on: restart from here instead of waiting forever
+    return;
+  }
+  voLost = false; lostCount = 0;
+  const [tx, ty] = tans();
+  // content moves right => camera turned left (+yaw); content moves down => camera tilted up (+pitch)
+  euler.set(Math.atan(2*r.dy/VN*ty), Math.atan(2*r.dx/VN*tx), 0, 'YXZ');
+  qVis.copy(qKey).multiply(qStep.setFromEuler(euler));
+  if (Math.abs(r.dx) > VN*0.15 || Math.abs(r.dy) > VN*0.15) swapKey(); // new key frame
+}
+
+// ---------- settings ----------
+const S = { fov:68, lag:60, vmax:45, str:0.5, vfov:95 };
+[['fov','°'],['lag',' мс'],['vmax','°/с'],['str',''],['vfov','°']].forEach(([k,u]) => {
+  const el = $(k), o = $(k+'O');
+  const upd = () => { S[k] = +el.value; o.textContent = (k==='str' ? S[k].toFixed(2) : S[k]) + u; };
+  el.addEventListener('input', upd); upd();
+});
+$('set').onclick = () => { $('drawer').hidden = !$('drawer').hidden; $('set').classList.toggle('on', !$('drawer').hidden); };
+
+// ---------- state & buttons ----------
+let running = false, painting = true, freeView = false, manual = '';
+const mode = () => manual || (gyro ? 'gyro' : 'vision');
+document.querySelectorAll('#seg button').forEach(b => b.onclick = () => {
+  manual = b.dataset.m; hasKey = false;
+  document.querySelectorAll('#seg button').forEach(x => x.classList.toggle('on', x === b));
+});
+$('start').onclick = async () => {
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      try { await DeviceOrientationEvent.requestPermission(); } catch(_) {}
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:false,
+      video:{ facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} } });
+    video.srcObject = stream; await video.play(); videoReady = true; hookFrames();
+    window.addEventListener('deviceorientation', onOri);
+    running = true;
+    $('splash').hidden = true; $('start').hidden = true;
+    ['paint','view','clear','save'].forEach(id => $(id).hidden = false);
+  } catch (err) {
+    $('splash').hidden = false;
+    $('splash').querySelector('p').innerHTML = '<span class="err">Камера недоступна: ' + (err && err.message || err) + '</span>';
+  }
+};
+$('paint').onclick = () => { painting = !painting; $('paint').textContent = painting ? 'Пауза' : 'Писать'; $('paint').classList.toggle('on', !painting); };
+$('view').onclick = () => {
+  freeView = !freeView; $('view').classList.toggle('on', freeView);
+  if (freeView) { // start free-look from the current direction
+    const f = new THREE.Vector3(0,0,-1).applyQuaternion(viewCam.quaternion);
+    yaw = Math.atan2(-f.x, -f.z); pitch = Math.asin(Math.max(-1,Math.min(1,f.y)));
+  }
+};
+let clearArm = 0;
+$('clear').onclick = () => {
+  const t = performance.now();
+  if (t - clearArm < 2000) { clearPano(); qVis.identity(); hasKey = false; $('clear').textContent = 'Сброс'; clearArm = 0; }
+  else { clearArm = t; $('clear').textContent = 'Точно?'; setTimeout(() => { $('clear').textContent = 'Сброс'; }, 2000); }
+};
+$('save').onclick = () => {
+  const buf = new Uint8Array(PW*PH*4);
+  renderer.readRenderTargetPixels(pano, 0, 0, PW, PH, buf);
+  const c = document.createElement('canvas'); c.width = PW; c.height = PH;
+  const ctx = c.getContext('2d'), img = ctx.createImageData(PW, PH);
+  for (let y = 0; y < PH; y++) {
+    const src = (PH-1-y)*PW*4, dst = y*PW*4;
+    for (let x = 0; x < PW*4; x += 4) {
+      const a = buf[src+x+3]/255 || 0;
+      img.data[dst+x]   = a ? Math.min(255, buf[src+x]  /a) : 0;
+      img.data[dst+x+1] = a ? Math.min(255, buf[src+x+1]/a) : 0;
+      img.data[dst+x+2] = a ? Math.min(255, buf[src+x+2]/a) : 0;
+      img.data[dst+x+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  c.toBlob(b => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+    a.download = 'pano360_' + new Date().toISOString().replace(/[:.]/g,'-') + '.png';
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }, 'image/png');
+};
+
+// ---------- loop ----------
+const qPaint = new THREE.Quaternion(), qPrev = new THREE.Quaternion(), qInv = new THREE.Quaternion();
+const m4 = new THREE.Matrix4();
+let tPrev = performance.now(), speed = 0, covT = 0;
+function setRot(mat, q){ qInv.copy(q).invert(); m4.makeRotationFromQuaternion(qInv); mat.setFromMatrix4(m4); }
+function tans(){
+  const tl = Math.tan(S.fov*deg/2), w = video.videoWidth || 16, h = video.videoHeight || 9;
+  return w >= h ? [tl, tl*h/w] : [tl*w/h, tl];
+}
+function resize(){
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  renderer.setSize(w, h, false); viewCam.aspect = w/h; viewCam.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize); resize();
+
+function frame(){
+  requestAnimationFrame(frame);
+  const now = performance.now(), dt = Math.max(1, now - tPrev) / 1000; tPrev = now;
+  const m = mode();
+  const fresh = newFrame || !video.requestVideoFrameCallback;
+  if (m === 'vision' && running && videoReady && fresh && video.videoWidth) voStep();
+  const qCam = m === 'gyro' ? qAt(now - S.lag, qPaint) : m === 'vision' ? qPaint.copy(qVis) : qPaint.copy(dragQ());
+  const ang = 2*Math.acos(Math.min(1, Math.abs(qPrev.dot(qCam)))) / deg;
+  speed = speed*0.7 + (ang/dt)*0.3; qPrev.copy(qCam);
+  $('spd').innerHTML = 'ω <b>' + speed.toFixed(0) + '</b>°/с';
+  $('src').innerHTML = 'датчик <b>' + (m === 'gyro' ? 'гироскоп' : m === 'mouse' ? 'мышь'
+    : 'картинка · уверенность ' + (voFlat ? 'нет фактуры' : voPsr.toFixed(0))) + '</b>';
+
+  const [tx, ty] = tans();
+  paintMat.uniforms.uTan.value.set(tx, ty); dispMat.uniforms.uTan.value.set(tx, ty);
+  setRot(paintMat.uniforms.uRot.value, qCam); setRot(dispMat.uniforms.uRot.value, qCam);
+
+  // paint
+  let state = 'off';
+  if (running && videoReady && painting && !(freeView && m === 'mouse')) {
+    if (m === 'vision' && voLost) state = 'lost';
+    else if (speed < S.vmax) {
+      state = 'paint';
+      if (fresh) {
+        paintMat.uniforms.uW.value = S.str * (1 - speed/S.vmax);
+        renderer.setRenderTarget(pano); renderer.render(paintScene, orthoCam); renderer.setRenderTarget(null);
+        newFrame = false;
+      }
+    } else state = 'fast';
+  }
+  const stEl = $('st'); stEl.className = 'chip state-' + state;
+  stEl.innerHTML = 'кисть <b>' + (state==='paint' ? 'пишет' : state==='fast' ? 'быстро' : state==='lost' ? 'потерян след' : 'стоп') + '</b>';
+  newFrame = false;
+
+  // view
+  viewCam.fov = S.vfov; viewCam.updateProjectionMatrix();
+  viewCam.quaternion.copy(freeView || m === 'mouse' ? dragQ() : m === 'gyro' ? qLive : qVis);
+  dispMat.uniforms.uLive.value = (running && !freeView) ? 1 : 0;
+  renderer.setRenderTarget(null); renderer.setClearColor(0x050607, 1); renderer.clear();
+  renderer.render(viewScene, viewCam);
+
+  if (running && now - covT > 800) { covT = now; $('cov').innerHTML = 'покрытие <b>' + (coverage()*100).toFixed(1) + '%</b>'; }
+}
+requestAnimationFrame(frame);
+})();
+</script>
+<script>if("serviceWorker" in navigator){addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}</script>
+</body>
+</html>
