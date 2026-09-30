@@ -62,6 +62,7 @@ button.on{border-color:var(--accent);color:var(--accent)}
 <div class="splash" id="splash"><div>
   <h1>Пузырь 360</h1>
   <p>Нажмите «Старт» и медленно поворачивайтесь с телефоном, стоя на месте. Кадры камеры ложатся на сферу по гироскопу.</p>
+  <p class="hint">версия v6</p>
   <p class="err" id="secure" hidden>Нужен HTTPS или localhost, иначе браузер не даст камеру.</p>
 </div></div>
 
@@ -80,7 +81,7 @@ button.on{border-color:var(--accent);color:var(--accent)}
     <input id="str" type="range" min="0.05" max="1" step="0.05" value="0.7"></div>
   <div class="row"><label for="vfov">Обзор экрана</label><output id="vfovO">95°</output>
     <input id="vfov" type="range" min="50" max="130" step="1" value="95"></div>
-  <p class="hint">«Картинка» — поворот считается по сдвигу кадра, гироскоп не нужен. Поворачивайте камеру на месте, без сдвига вбок. Задержка нужна только для гироскопа. Угол камеры подбирайте по совпадению швов.</p>
+  <p class="hint">Версия v6. «Картинка» — поворот считается по сдвигу кадра, гироскоп не нужен. Поворачивайте камеру на месте, без сдвига вбок. Задержка нужна только для гироскопа. Угол камеры подбирайте по совпадению швов.</p>
 </div>
 
 <div class="bar">
@@ -475,6 +476,13 @@ function frame(){
 requestAnimationFrame(frame);
 })();
 </script>
-<script>if("serviceWorker" in navigator){addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}</script>
+<script>
+if ("serviceWorker" in navigator) {
+  // reload once when a new version takes over, so the phone never keeps showing the old page
+  let reloaded = false, hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } hadController = true; });
+  addEventListener("load", () => navigator.serviceWorker.register("sw.js", {updateViaCache: "none"}).then(r => r.update()).catch(() => {}));
+}
+</script>
 </body>
 </html>
