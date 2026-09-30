@@ -25,7 +25,7 @@ canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
 .hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 10px) 16px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;pointer-events:none}
 .chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:4px 10px;font:12px var(--mono);font-variant-numeric:tabular-nums;backdrop-filter:blur(6px)}
 .chip b{color:var(--accent);font-weight:600}
-.chip.state-paint b{color:var(--accent)} .chip.state-fast b{color:var(--warn)} .chip.state-off b{color:var(--muted)} .chip.state-lost b{color:var(--bad)}
+.chip.state-paint b{color:var(--accent)} .chip.state-fast b{color:var(--warn)} .chip.state-off b{color:var(--muted)} .chip.state-lost b{color:var(--bad)} .chip.state-blur b{color:var(--warn)}
 .seg{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .seg span{width:100%;font-size:13px}
 .seg button{padding:8px 10px;font-size:13px;font-weight:500}
@@ -55,6 +55,7 @@ button.on{border-color:var(--accent);color:var(--accent)}
   <span class="chip" id="cov">покрытие <b>0%</b></span>
   <span class="chip state-off" id="st">кисть <b>—</b></span>
   <span class="chip" id="spd">ω <b>0</b>°/с</span>
+  <span class="chip" id="shp">резкость <b>—</b></span>
   <span class="chip" id="src">датчик <b>—</b></span>
 </div>
 
@@ -73,8 +74,10 @@ button.on{border-color:var(--accent);color:var(--accent)}
     <input id="lag" type="range" min="0" max="250" step="5" value="60"></div>
   <div class="row"><label for="vmax">Порог скорости (выше — не красим)</label><output id="vmaxO">45°/с</output>
     <input id="vmax" type="range" min="10" max="150" step="5" value="45"></div>
+  <div class="row"><label for="sharp">Порог резкости (от лучшего недавнего кадра)</label><output id="sharpO">85%</output>
+    <input id="sharp" type="range" min="0.5" max="0.98" step="0.01" value="0.85"></div>
   <div class="row"><label for="str">Сила кисти</label><output id="strO">0.50</output>
-    <input id="str" type="range" min="0.05" max="1" step="0.05" value="0.5"></div>
+    <input id="str" type="range" min="0.05" max="1" step="0.05" value="0.7"></div>
   <div class="row"><label for="vfov">Обзор экрана</label><output id="vfovO">95°</output>
     <input id="vfov" type="range" min="50" max="130" step="1" value="95"></div>
   <p class="hint">«Картинка» — поворот считается по сдвигу кадра, гироскоп не нужен. Поворачивайте камеру на месте, без сдвига вбок. Задержка нужна только для гироскопа. Угол камеры подбирайте по совпадению швов.</p>
@@ -279,7 +282,7 @@ const alR = F(VN*VN), alI = F(VN*VN);                                        // 
 const qVis = new THREE.Quaternion(), qKey = new THREE.Quaternion(), qStep = new THREE.Quaternion();
 let hasKey = false, voLost = false, voPsr = 0, lostCount = 0, voFlat = false, voRoll = 0;
 const PSR_OK = 12, ROLL_PSR_OK = 8, REKEY_AFTER = 10;
-window.__bubble = { qVis, stat: () => ({ psr: voPsr, lost: voLost, flat: voFlat, roll: voRoll }) };
+window.__bubble = { qVis, sharp: () => ({ now: shNow, ref: shRef, rel: shRel }), stat: () => ({ psr: voPsr, lost: voLost, flat: voFlat, roll: voRoll }) };
 const _r = new THREE.Vector3(), _u = new THREE.Vector3();
 function camRoll(q){ _r.set(1,0,0).applyQuaternion(q); _u.set(0,1,0).applyQuaternion(q); return Math.atan2(_r.y, _u.y)/deg; }
 window.__bubble.camRoll = () => camRoll(qVis);
@@ -321,11 +324,27 @@ function voStep(){
   if (Math.abs(r.dx) > VN*0.15 || Math.abs(r.dy) > VN*0.15 || Math.abs(roll) > 10) swapKey(); // new key frame
 }
 
+// ---------- frame sharpness: native-resolution centre crop, adaptive reference ----------
+const SC = 384;
+const scv = document.createElement('canvas'); scv.width = SC; scv.height = SC;
+const sctx = scv.getContext('2d', {willReadFrequently:true});
+const sgray = new Float32Array(SC*SC);
+let shNow = 0, shRef = 0, shRel = 1;
+function measureSharp(){
+  const w = video.videoWidth, h = video.videoHeight, c = Math.min(SC, w, h);
+  sctx.drawImage(video, (w-c)/2, (h-c)/2, c, c, 0, 0, c, c);      // 1:1 pixels, no resampling blur
+  const d = sctx.getImageData(0, 0, c, c).data;
+  for (let i = 0, j = 0; i < c*c; i++, j += 4) sgray[i] = d[j]*0.299 + d[j+1]*0.587 + d[j+2]*0.114;
+  shNow = sharpness(sgray, c, c);
+  shRef = Math.max(shNow, shRef*0.985);                             // best recent frame, forgets in ~1.5 s
+  shRel = shRef > 0 ? shNow/shRef : 1;
+}
+
 // ---------- settings ----------
-const S = { fov:68, lag:60, vmax:45, str:0.5, vfov:95 };
-[['fov','°'],['lag',' мс'],['vmax','°/с'],['str',''],['vfov','°']].forEach(([k,u]) => {
+const S = { fov:68, lag:60, vmax:45, str:0.7, vfov:95, sharp:0.85 };
+[['fov','°'],['lag',' мс'],['vmax','°/с'],['str',''],['vfov','°'],['sharp','%']].forEach(([k,u]) => {
   const el = $(k), o = $(k+'O');
-  const upd = () => { S[k] = +el.value; o.textContent = (k==='str' ? S[k].toFixed(2) : S[k]) + u; };
+  const upd = () => { S[k] = +el.value; o.textContent = (k==='str' ? S[k].toFixed(2) : k==='sharp' ? Math.round(S[k]*100) : S[k]) + u; };
   el.addEventListener('input', upd); upd();
 });
 $('set').onclick = () => { $('drawer').hidden = !$('drawer').hidden; $('set').classList.toggle('on', !$('drawer').hidden); };
@@ -411,11 +430,13 @@ function frame(){
   const now = performance.now(), dt = Math.max(1, now - tPrev) / 1000; tPrev = now;
   const m = mode();
   const fresh = newFrame || !video.requestVideoFrameCallback;
+  if (running && videoReady && fresh && video.videoWidth) measureSharp();
   if (m === 'vision' && running && videoReady && fresh && video.videoWidth) voStep();
   const qCam = m === 'gyro' ? qAt(now - S.lag, qPaint) : m === 'vision' ? qPaint.copy(qVis) : qPaint.copy(dragQ());
   const ang = 2*Math.acos(Math.min(1, Math.abs(qPrev.dot(qCam)))) / deg;
   speed = speed*0.7 + (ang/dt)*0.3; qPrev.copy(qCam);
   $('spd').innerHTML = 'ω <b>' + speed.toFixed(0) + '</b>°/с';
+  $('shp').innerHTML = 'резкость <b>' + Math.round(shRel*100) + '%</b>';
   $('src').innerHTML = 'датчик <b>' + (m === 'gyro' ? 'гироскоп' : m === 'mouse' ? 'мышь'
     : 'картинка · уверенность ' + (voFlat ? 'нет фактуры' : voPsr.toFixed(0)) + ' · крен ' + camRoll(qVis).toFixed(0) + '°') + '</b>';
 
@@ -427,17 +448,19 @@ function frame(){
   let state = 'off';
   if (running && videoReady && painting && !(freeView && m === 'mouse')) {
     if (m === 'vision' && voLost) state = 'lost';
+    else if (shRel < S.sharp) state = 'blur';
     else if (speed < S.vmax) {
       state = 'paint';
       if (fresh) {
-        paintMat.uniforms.uW.value = S.str * (1 - speed/S.vmax);
+        const q = Math.min(1, (shRel - S.sharp) / Math.max(0.02, 1 - S.sharp));   // 0 at threshold, 1 = best recent
+        paintMat.uniforms.uW.value = S.str * (1 - speed/S.vmax) * (0.4 + 0.6*q);
         renderer.setRenderTarget(pano); renderer.render(paintScene, orthoCam); renderer.setRenderTarget(null);
         newFrame = false;
       }
     } else state = 'fast';
   }
   const stEl = $('st'); stEl.className = 'chip state-' + state;
-  stEl.innerHTML = 'кисть <b>' + (state==='paint' ? 'пишет' : state==='fast' ? 'быстро' : state==='lost' ? 'потерян след' : 'стоп') + '</b>';
+  stEl.innerHTML = 'кисть <b>' + (state==='paint' ? 'пишет' : state==='fast' ? 'быстро' : state==='lost' ? 'потерян след' : state==='blur' ? 'мыло, жду' : 'стоп') + '</b>';
   newFrame = false;
 
   // view
