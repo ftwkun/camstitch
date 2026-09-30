@@ -22,9 +22,9 @@ function makePC(N){
   }
   function fft2(re, im, inv){ for(let y=0;y<N;y++) fft1(re,im,y*N,1,inv); for(let x=0;x<N;x++) fft1(re,im,x,N,inv); }
   // gray: Float32Array N*N (row 0 = top). Fills spectrum (re,im).
-  function spectrum(gray, re, im){
+  function spectrum(gray, re, im, periodicX){
     let m=0; for (let i=0;i<N*N;i++) m+=gray[i]; m/=N*N;
-    for (let y=0;y<N;y++) for (let x=0;x<N;x++){ const i=y*N+x; re[i]=(gray[i]-m)*hann[x]*hann[y]; im[i]=0; }
+    for (let y=0;y<N;y++) for (let x=0;x<N;x++){ const i=y*N+x; re[i]=(gray[i]-m)*(periodicX?1:hann[x])*hann[y]; im[i]=0; }
     fft2(re, im, false);
   }
   const cr = new Float32Array(N*N), ci = new Float32Array(N*N);
@@ -60,4 +60,40 @@ function makePC(N){
   }
   return { spectrum, correlate, setLowpass };
 }
-if (typeof module!=='undefined') module.exports = makePC;
+
+// Polar resampling of the amplitude spectrum: rotation of the image becomes a cyclic shift along x.
+// Amplitude of a real image is symmetric, so angles cover [0, pi). Rows = radius, cols = angle.
+function makePolar(N, P){
+  const rmin = 4, rmax = N*0.42;
+  const cosA = new Float32Array(P), sinA = new Float32Array(P), rad = new Float32Array(P);
+  for (let a=0;a<P;a++){ const t=a*Math.PI/P; cosA[a]=Math.cos(t); sinA[a]=Math.sin(t); }
+  for (let j=0;j<P;j++) rad[j] = rmin + j*(rmax-rmin)/(P-1);
+  const mag = new Float32Array(N*N);
+  function polar(re, im, out){
+    for (let i=0;i<N*N;i++) mag[i] = Math.log1p(Math.hypot(re[i], im[i]));
+    const at = (x,y) => mag[((y%N+N)%N)*N + ((x%N+N)%N)];
+    for (let j=0;j<P;j++){ const r = rad[j], w = r/rmax;          // radius weight = high-pass emphasis
+      for (let a=0;a<P;a++){
+        const fx = r*cosA[a], fy = r*sinA[a], x0 = Math.floor(fx), y0 = Math.floor(fy), dx = fx-x0, dy = fy-y0;
+        const v = at(x0,y0)*(1-dx)*(1-dy) + at(x0+1,y0)*dx*(1-dy) + at(x0,y0+1)*(1-dx)*dy + at(x0+1,y0+1)*dx*dy;
+        out[j*P+a] = v*w;
+      } }
+  }
+  return { polar, degPerBin: 180/P };
+}
+// rotate an N*N gray image by ang (radians, counter-clockwise in a y-up picture) around its centre
+function rotateGray(src, dst, N, ang){
+  const c = Math.cos(ang), s = Math.sin(ang), h = (N-1)/2;
+  for (let y=0;y<N;y++){ const yy = h - y; for (let x=0;x<N;x++){ const xx = x - h;
+    // inverse map: dst(p) = src(R^-1 p), y-up coordinates
+    const sx = c*xx + s*yy, sy = -s*xx + c*yy;
+    const fx = sx + h, fy = h - sy, x0 = Math.floor(fx), y0 = Math.floor(fy);
+    if (x0 < 0 || y0 < 0 || x0 >= N-1 || y0 >= N-1){ dst[y*N+x] = NaN; continue; }
+    const ax = fx-x0, ay = fy-y0, i = y0*N+x0;
+    dst[y*N+x] = src[i]*(1-ax)*(1-ay) + src[i+1]*ax*(1-ay) + src[i+N]*(1-ax)*ay + src[i+N+1]*ax*ay;
+  } }
+  // fill corners with the mean so they don't add hard edges
+  let m=0,n=0; for (let i=0;i<N*N;i++) if (dst[i]===dst[i]){ m+=dst[i]; n++; } m = n? m/n : 0;
+  for (let i=0;i<N*N;i++) if (dst[i]!==dst[i]) dst[i]=m;
+}
+if (typeof module!=='undefined') module.exports = { makePC, makePolar, rotateGray };
