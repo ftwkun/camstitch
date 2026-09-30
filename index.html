@@ -250,32 +250,44 @@ canvas.addEventListener('pointermove', e => {
 canvas.addEventListener('pointerup', () => dragging = false);
 canvas.addEventListener('pointercancel', () => dragging = false);
 
-// ---------- visual odometry: rotation from image shift (phase correlation, hhgm idea) ----------
-const VN = 256, pc = makePC(VN);
+// ---------- visual odometry (hhgm idea): yaw/pitch from image shift, roll from rotation of the amplitude spectrum ----------
+const VN = 256, VP = 256, pc = makePC(VN), pcP = makePC(VP), pol = makePolar(VN, VP);
 const vcv = document.createElement('canvas'); vcv.width = VN; vcv.height = VN;
 const vctx = vcv.getContext('2d', {willReadFrequently:true});
-// halving chain so every step is a true 2x average (plain drawImage to 256 keeps webcam noise)
+// halving chain so every step is a true 2x average (plain drawImage to 256 keeps webcam noise);
+// the last step takes the centre square without squashing, so a roll stays a true rotation
 const halves = [];
 function downsample(){
   let src = video, w = video.videoWidth, h = video.videoHeight;
   let i = 0;
-  while (w/2 >= VN*1.5 || h/2 >= VN*1.5) {
+  while (Math.min(w, h)/2 >= VN*1.5) {
     w = Math.round(w/2); h = Math.round(h/2);
     if (!halves[i]) { const c = document.createElement('canvas'); halves[i] = { c, x: c.getContext('2d') }; }
     const H = halves[i];
     if (H.c.width !== w || H.c.height !== h) { H.c.width = w; H.c.height = h; H.x.imageSmoothingQuality = 'high'; }
     H.x.drawImage(src, 0, 0, w, h); src = H.c; i++;
   }
+  const sq = Math.min(w, h);
   vctx.imageSmoothingQuality = 'high';
-  vctx.drawImage(src, 0, 0, VN, VN);
+  vctx.drawImage(src, (w-sq)/2, (h-sq)/2, sq, sq, 0, 0, VN, VN);
 }
-const gray = new Float32Array(VN*VN);
-let keyR = new Float32Array(VN*VN), keyI = new Float32Array(VN*VN), curR = new Float32Array(VN*VN), curI = new Float32Array(VN*VN);
+const F = n => new Float32Array(n);
+const gray = F(VN*VN), grayRot = F(VN*VN), polBuf = F(VP*VP);
+let keyR = F(VN*VN), keyI = F(VN*VN), curR = F(VN*VN), curI = F(VN*VN);      // image spectra (key / current, un-rotated)
+let keyPR = F(VP*VP), keyPI = F(VP*VP), curPR = F(VP*VP), curPI = F(VP*VP);  // polar spectra for roll
+const alR = F(VN*VN), alI = F(VN*VN);                                        // current, de-rotated to the key
 const qVis = new THREE.Quaternion(), qKey = new THREE.Quaternion(), qStep = new THREE.Quaternion();
-let hasKey = false, voLost = false, voPsr = 0, lostCount = 0, voFlat = false;
-const PSR_OK = 12, REKEY_AFTER = 10;   // confidence threshold; frames of loss before re-keying at held pose
-window.__bubble = { qVis, stat: () => ({ psr: voPsr, lost: voLost, flat: voFlat }) };
-function swapKey(){ let t = keyR; keyR = curR; curR = t; t = keyI; keyI = curI; curI = t; qKey.copy(qVis); hasKey = true; lostCount = 0; }
+let hasKey = false, voLost = false, voPsr = 0, lostCount = 0, voFlat = false, voRoll = 0;
+const PSR_OK = 12, ROLL_PSR_OK = 8, REKEY_AFTER = 10;
+window.__bubble = { qVis, stat: () => ({ psr: voPsr, lost: voLost, flat: voFlat, roll: voRoll }) };
+const _r = new THREE.Vector3(), _u = new THREE.Vector3();
+function camRoll(q){ _r.set(1,0,0).applyQuaternion(q); _u.set(0,1,0).applyQuaternion(q); return Math.atan2(_r.y, _u.y)/deg; }
+window.__bubble.camRoll = () => camRoll(qVis);
+function swapKey(){
+  let t = keyR; keyR = curR; curR = t; t = keyI; keyI = curI; curI = t;
+  t = keyPR; keyPR = curPR; curPR = t; t = keyPI; keyPI = curPI; curPI = t;
+  qKey.copy(qVis); hasKey = true; lostCount = 0;
+}
 function voStep(){
   downsample();
   const d = vctx.getImageData(0, 0, VN, VN).data;
@@ -285,20 +297,28 @@ function voStep(){
   voFlat = sd < 4;                                   // black / blank frame: nothing to track
   if (voFlat) { voLost = true; voPsr = 0; return; }
   pc.spectrum(gray, curR, curI);
+  pol.polar(curR, curI, polBuf); pcP.spectrum(polBuf, curPR, curPI, true);
   if (!hasKey) { swapKey(); voLost = false; return; }
-  const r = pc.correlate(keyR, keyI, curR, curI);   // content shift key -> current, px (+x right, +y down)
+
+  // 1) roll: amplitude spectrum ignores the shift and turns with the picture; in polar form that is a shift along angle
+  const rr = pcP.correlate(keyPR, keyPI, curPR, curPI);
+  let roll = rr.psr >= ROLL_PSR_OK ? -rr.dx * pol.degPerBin : 0;     // content rotation, deg, CCW with y up
+  // 2) undo the roll, then yaw/pitch from the remaining shift
+  let sR = curR, sI = curI;
+  if (Math.abs(roll) > 0.15) { rotateGray(gray, grayRot, VN, -roll*Math.PI/180); pc.spectrum(grayRot, alR, alI); sR = alR; sI = alI; }
+  const r = pc.correlate(keyR, keyI, sR, sI);        // content shift key -> current, px (+x right, +y down)
   voPsr = r.psr;
   if (r.psr < PSR_OK) {                              // no reliable match: hold pose
     voLost = true;
     if (++lostCount >= REKEY_AFTER) swapKey();       // scene moved on: restart from here instead of waiting forever
     return;
   }
-  voLost = false; lostCount = 0;
-  const [tx, ty] = tans();
-  // content moves right => camera turned left (+yaw); content moves down => camera tilted up (+pitch)
-  euler.set(Math.atan(2*r.dy/VN*ty), Math.atan(2*r.dx/VN*tx), 0, 'YXZ');
+  voLost = false; lostCount = 0; voRoll = roll;
+  const [tx, ty] = tans(), tsq = Math.min(tx, ty);   // the tracked square spans the short side of the frame
+  // content right => camera turned left (+yaw); content down => tilted up (+pitch); content CCW => camera rolled CW (-roll)
+  euler.set(Math.atan(2*r.dy/VN*tsq), Math.atan(2*r.dx/VN*tsq), -roll*deg, 'YXZ');
   qVis.copy(qKey).multiply(qStep.setFromEuler(euler));
-  if (Math.abs(r.dx) > VN*0.15 || Math.abs(r.dy) > VN*0.15) swapKey(); // new key frame
+  if (Math.abs(r.dx) > VN*0.15 || Math.abs(r.dy) > VN*0.15 || Math.abs(roll) > 10) swapKey(); // new key frame
 }
 
 // ---------- settings ----------
@@ -397,7 +417,7 @@ function frame(){
   speed = speed*0.7 + (ang/dt)*0.3; qPrev.copy(qCam);
   $('spd').innerHTML = 'ω <b>' + speed.toFixed(0) + '</b>°/с';
   $('src').innerHTML = 'датчик <b>' + (m === 'gyro' ? 'гироскоп' : m === 'mouse' ? 'мышь'
-    : 'картинка · уверенность ' + (voFlat ? 'нет фактуры' : voPsr.toFixed(0))) + '</b>';
+    : 'картинка · уверенность ' + (voFlat ? 'нет фактуры' : voPsr.toFixed(0)) + ' · крен ' + camRoll(qVis).toFixed(0) + '°') + '</b>';
 
   const [tx, ty] = tans();
   paintMat.uniforms.uTan.value.set(tx, ty); dispMat.uniforms.uTan.value.set(tx, ty);
