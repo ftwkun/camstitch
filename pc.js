@@ -96,4 +96,16 @@ function rotateGray(src, dst, N, ang){
   let m=0,n=0; for (let i=0;i<N*N;i++) if (dst[i]===dst[i]){ m+=dst[i]; n++; } m = n? m/n : 0;
   for (let i=0;i<N*N;i++) if (dst[i]!==dst[i]) dst[i]=m;
 }
-if (typeof module!=='undefined') module.exports = { makePC, makePolar, rotateGray };
+// Normalized gradient energy on a 2x2-binned image: mean(|grad|^2) / var(I).
+// Binning suppresses sensor noise, the variance makes it exposure/contrast invariant; it drops fast with blur.
+function sharpness(g, w, h){
+  const W = w>>1, H = h>>1, b = new Float32Array(W*H);
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=2*y*w+2*x; b[y*W+x]=(g[i]+g[i+1]+g[i+w]+g[i+w+1])*0.25; }
+  let s1=0, s2=0, e=0, n=0;
+  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x, v=b[i];
+    const gx=b[i+1]-b[i-1], gy=b[i+W]-b[i-W]; e+=gx*gx+gy*gy; s1+=v; s2+=v*v; n++; }
+  const vr = s2/n-(s1/n)**2; return vr>1 ? e/n/vr : 0;
+}
+
+
+if (typeof module!=='undefined') module.exports = { makePC, makePolar, rotateGray, sharpness };
